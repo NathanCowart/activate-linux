@@ -5,6 +5,7 @@
 #include <X11/X.h>
 #include <X11/extensions/shape.h>
 #include <X11/extensions/Xfixes.h>
+#include <X11/extensions/Xinerama.h>
 
 #include <cairo.h>
 #include <cairo-xlib.h>
@@ -25,6 +26,18 @@ int main(int argc, char *argv[]) {
     Display *d = XOpenDisplay(NULL);
     Window root = DefaultRootWindow(d);
     int default_screen = XDefaultScreen(d);
+    int num_entries = 0;
+    XineramaScreenInfo *si = XineramaQueryScreens(d, &num_entries);
+
+    if (si == NULL)
+    {
+    perror("Required X extension Xinerama is not active");
+    XCloseDisplay(d);
+    return 1;
+    }
+
+    for (int i = 0; i < num_entries; i++)
+        printf("\nscreen number: %d\nx_org: %d\ny_org: %d\nwidth: %d\nheight: %d\n", si[i].screen_number, si[i].x_org, si[i].y_org, si[i].width, si[i].height);
 
     char *title, *subtitle;
 
@@ -33,43 +46,42 @@ int main(int argc, char *argv[]) {
     float scale = 1.0f;
 
     switch (argc) {
-	case (1):
-        #ifdef __APPLE__
-        title = "Activate MacOS";
-        subtitle = "Go to Settings to activate MacOS";
-        #else
-	    title = "Activate Linux";
-	    subtitle = "Go to Settings to activate Linux.";
-        #endif
-	    break;
+        case (1):
+            #ifdef __APPLE__
+            title = "Activate MacOS";
+            subtitle = "Go to Settings to activate MacOS";
+            #else
+            title = "Activate Linux";
+            subtitle = "Go to Settings to activate Linux.";
+            #endif
+            break;
 
-	case (2):
-	    title = argv[1];
-	    subtitle = "";
-	    break;
+        case (2):
+            title = argv[1];
+            subtitle = "";
+            break;
 
-	case (3):
-	    title = argv[1];
-	    subtitle = argv[2];
-	    break;
+        case (3):
+            title = argv[1];
+            subtitle = argv[2];
+            break;
 
-    case (4):
-        title = argv[1];
-	    subtitle = argv[2];
-        scale = atoi(argv[3]);
+        case (4):
+            title = argv[1];
+            subtitle = argv[2];
+            scale = atoi(argv[3]);
+            break;
 
-        break;
-
-	default:
-	    printf("More than needed arguments have been passed. This program only supports at most 2 arguments.\n");
-	    return 1;
+        default:
+            printf("More than needed arguments have been passed. This program only supports at most 2 arguments.\n");
+            return 1;
     } 
 
     XSetWindowAttributes attrs;
     attrs.override_redirect = 1;
 
     XVisualInfo vinfo;
-    if (!XMatchVisualInfo(d, DefaultScreen(d), 32, TrueColor, &vinfo)) {
+    if (!XMatchVisualInfo(d, default_screen, 32, TrueColor, &vinfo)) {
         printf("No visual found supporting 32 bit color, terminating\n");
         exit(EXIT_FAILURE);
     }
@@ -79,33 +91,40 @@ int main(int argc, char *argv[]) {
     attrs.background_pixel = 0;
     attrs.border_pixel = 0;
 
-    Window overlay = XCreateWindow(
-        d,                                                                     // display
-        root,                                                                  // parent
-        DisplayWidth(d, DefaultScreen(d)) - overlay_width * scale,             // x position
-        DisplayHeight(d, DefaultScreen(d)) - overlay_height * scale,           // y position
-        overlay_width * scale,                                                 // width
-        overlay_height * scale,                                                // height
-        0,                                                                     // border width
-        vinfo.depth,                                                           // depth
-        InputOutput,                                                           // class
-        vinfo.visual,                                                          // visual
-        CWOverrideRedirect | CWColormap | CWBackPixel | CWBorderPixel,         // value mask
-        &attrs                                                                 // attributes
-    );
+    Window overlay[num_entries];
+    cairo_surface_t *surface[num_entries];
+    cairo_t *cairo_ctx[num_entries];
 
-    XMapWindow(d, overlay);
+    for (int i = 0; i < num_entries; i++)
+    {
+    overlay[i] = XCreateWindow(
+            d,                                                                     // display
+            root,                                                                  // parent
+            si[i].x_org + si[i].width - overlay_width * scale,               // x position
+            si[i].y_org + si[i].height - overlay_height * scale,             // y position
+            overlay_width * scale,                                                 // width
+            overlay_height * scale,                                                // height
+            0,                                                                     // border width
+            vinfo.depth,                                                           // depth
+            InputOutput,                                                           // class
+            vinfo.visual,                                                          // visual
+            CWOverrideRedirect | CWColormap | CWBackPixel | CWBorderPixel,         // value mask
+            &attrs                                                                 // attributes
+        );
     
-    // allows the mouse to click through the overlay
-    XRectangle rect;
-    XserverRegion region = XFixesCreateRegion(d, &rect, 1);
-    XFixesSetWindowShapeRegion(d, overlay, ShapeInput, 0, 0, region);
-    XFixesDestroyRegion(d, region);
+        XMapWindow(d, overlay[i]);
 
-    // cairo context
-    cairo_surface_t* surface = cairo_xlib_surface_create(d, overlay, vinfo.visual, overlay_width * scale, overlay_height * scale);
-    cairo_t* cairo_ctx = cairo_create(surface);
-    draw(cairo_ctx, title, subtitle, scale);
+        // allows the mouse to click through the overlay
+        XRectangle rect;
+        XserverRegion region = XFixesCreateRegion(d, &rect, 1);
+        XFixesSetWindowShapeRegion(d, overlay[i], ShapeInput, 0, 0, region);
+        XFixesDestroyRegion(d, region);
+
+        // cairo context
+        surface[i] = cairo_xlib_surface_create(d, overlay[i], vinfo.visual, overlay_width * scale, overlay_height * scale);
+        cairo_ctx[i] = cairo_create(surface[i]);
+        draw(cairo_ctx[i], title, subtitle, scale);
+    }
     
     // wait for X events forever
     XEvent event;
@@ -113,10 +132,14 @@ int main(int argc, char *argv[]) {
         XNextEvent(d, &event);
     }  
 
-    cairo_destroy(cairo_ctx);
-    cairo_surface_destroy(surface);
+    for (int i = 0; i < num_entries; i++)
+    {
+        XUnmapWindow(d, overlay[i]);
+        cairo_destroy(cairo_ctx[i]);
+        cairo_surface_destroy(surface[i]);
+    }
 
-    XUnmapWindow(d, overlay);
+    XFree(si);
     XCloseDisplay(d);
     return 0;
 }
